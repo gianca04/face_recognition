@@ -46,3 +46,33 @@ In the `examples`-directory there is currently only one example that shows how t
 ## Notes
 
 I'm not a Python expert, so I'm pretty sure you can optimize the Python code further :) Please feel free to send PR's or open issues.
+
+# 1. Clona el repositorio en tu máquina
+git clone https://github.com/JanLoebel/face_recognition.git
+cd face_recognition
+
+# 2. Construye la imagen Docker (esto se hace una sola vez)
+docker build -t facerec_service .
+
+# 3. Ejecuta el contenedor montando tu código local (modo desarrollo)
+# PowerShell
+docker run -d `
+  -p 8080:8080 `
+  -v ${PWD}:/root/app `
+  -v faces:/root/faces `
+  --name facerec_dev `
+  facerec_service `
+  python3 /root/app/facerec_service.py
+# CMD
+docker run -d -p 8080:8080 -v %cd%:/root/app -v faces: root/faces --name facerec_dev facerec_service python3 root/app/facerec_service.py
+
+
+# 4. Verifica que el contenedor está corriendo
+docker ps
+
+# 5. Reinicia el contenedor cuando hagas cambios (usando watch.ps1)
+.\watch.ps1
+
+# 6. Accede al servicio desde tu navegador o curl
+curl http://localhost:8080/faces
+
