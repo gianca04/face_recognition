@@ -1,175 +1,231 @@
 from os import listdir, remove
 from os.path import isfile, join, splitext
-
+import os
 import requests
-
 import face_recognition
+from datetime import datetime
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from werkzeug.exceptions import BadRequest
+from dotenv import load_dotenv
+import logging
 
-# Diccionario global que almacena los rostros conocidos (identificador -> encoding facial)
-faces_dict = {}
+# === Configuración inicial ===
 
-# Ruta en el sistema donde se almacenan de forma persistente las imágenes de rostros
-persistent_faces = "/root/faces"
+# Cargar variables del .env
+load_dotenv()
 
-# Crear la aplicación Flask y habilitar CORS para permitir peticiones desde otros orígenes
+LARAVEL_API_URL = os.getenv("LARAVEL_API_URL", "http://localhost:8000")
+RECOGNITION_THRESHOLD = float(os.getenv("MATCH_TOLERANCE", "0.6"))
+LOG_FILE_PATH = os.getenv("LOG_FILE", "reconocimiento.log")
+
+# Configurar logging
+logging.basicConfig(
+    filename=LOG_FILE_PATH,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+
+# Inicializar app Flask
 app = Flask(__name__)
 CORS(app)
 
-# Obtener todos los rostros de una matricula
+# === Variables ===
+
+faces_dict = {}  # (No usado si se consulta desde Laravel)
+persistent_faces = "/root/faces"
+
+# === Utilidades ===
+
+
+def is_picture(filename):
+    image_extensions = {"png", "jpg", "jpeg", "gif"}
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in image_extensions
+
+
+def get_all_picture_files(path):
+    return [
+        join(path, f) for f in listdir(path) if isfile(join(path, f)) and is_picture(f)
+    ]
+
+
+def remove_file_ext(filename):
+    return splitext(filename.rsplit("/", 1)[-1])[0]
+
+
+def calc_face_encoding(image):
+    loaded_image = face_recognition.load_image_file(image)
+    faces = face_recognition.face_encodings(loaded_image)
+    if len(faces) > 1:
+        raise Exception("Found more than one face in the image.")
+    if not faces:
+        raise Exception("No face found in the image.")
+    return faces[0]
+
+
+def get_faces_dict(path):
+    image_files = get_all_picture_files(path)
+    return dict(
+        [(remove_file_ext(image), calc_face_encoding(image)) for image in image_files]
+    )
+
+
+def extract_image(request):
+    if "file" not in request.files:
+        raise BadRequest("Missing file parameter!")
+    file = request.files["file"]
+    if file.filename == "":
+        raise BadRequest("File is empty or invalid")
+    return file
+
+
+# === Llamadas a Laravel ===
+
+
 def get_faces_from_laravel(matricula_id):
-    url = f"http://attendance_api/api/biometricos/matricula/{matricula_id}"
+    url = f"{LARAVEL_API_URL}/api/biometricos/matricula/{matricula_id}"
+    logging.info(f"Solicitando rostros para matrícula ID {matricula_id}")
     response = requests.get(url)
     response.raise_for_status()
     return response.json()["rostros"]
 
-# <Funciones para manejo de imágenes> #
 
-# Verifica si el archivo tiene una extensión válida de imagen
-def is_picture(filename):
-    image_extensions = {'png', 'jpg', 'jpeg', 'gif'}
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in image_extensions
-
-# Devuelve una lista con rutas completas de archivos de imagen en el directorio especificado
-def get_all_picture_files(path):
-    files_in_dir = [join(path, f) for f in listdir(path) if isfile(join(path, f))]
-    return [f for f in files_in_dir if is_picture(f)]
-
-# Elimina la extensión del archivo y devuelve solo el nombre base
-def remove_file_ext(filename):
-    return splitext(filename.rsplit('/', 1)[-1])[0]
-
-# Obtiene el encoding facial (vector de características) de la primera cara en una imagen
-def calc_face_encoding(image):
-    loaded_image = face_recognition.load_image_file(image)
-    faces = face_recognition.face_encodings(loaded_image)
-
-    if len(faces) > 1:
-        raise Exception("Found more than one face in the given training image.")
-
-    if not faces:
-        raise Exception("Could not find any face in the given training image.")
-
-    return faces[0]  # Devuelve el encoding de la única cara encontrada
-
-# Construye un diccionario con ID de persona y su encoding facial a partir de imágenes almacenadas
-def get_faces_dict(path):
-    image_files = get_all_picture_files(path)
-    return dict([
-        (remove_file_ext(image), calc_face_encoding(image))
-        for image in image_files
-    ])
+def reportar_asistencias(matricula_id, rostros_detectados, timestamp):
+    url = f"{LARAVEL_API_URL}/api/asistencias/registro-masivo"
+    data = {
+        "matricula_id": matricula_id,
+        "rostros_detectados": rostros_detectados,
+        "captura": timestamp,
+    }
+    logging.info(f"Enviando asistencias detectadas: {data}")
+    try:
+        response = requests.post(url, json=data)
+        response.raise_for_status()
+        logging.info("✔ Asistencias registradas correctamente.")
+        return True
+    except Exception as e:
+        logging.error(f"❌ Error al registrar asistencias: {str(e)}")
+        return False
 
 
-# Detecta rostros en una imagen subida y compara con los rostros conocidos
+# === Lógica de reconocimiento ===
+
+
 def detect_faces_in_image(file_stream, rostros_a_comparar):
     img = face_recognition.load_image_file(file_stream)
     uploaded_faces = face_recognition.face_encodings(img)
 
-    faces_found = len(uploaded_faces)
-    faces = []
+    logging.info(f"{len(uploaded_faces)} rostro(s) detectado(s) en imagen recibida.")
 
-    if faces_found:
+    rostros_detectados = []
+
+    if uploaded_faces:
         for uploaded_face in uploaded_faces:
             for rostro in rostros_a_comparar:
                 known_encoding = rostro["encoding"]
-                match_result = face_recognition.compare_faces([known_encoding], uploaded_face, tolerance=0.6)[0]
+                match = face_recognition.compare_faces(
+                    [known_encoding], uploaded_face, tolerance=RECOGNITION_THRESHOLD
+                )[0]
 
-                if match_result:
-                    distancia = face_recognition.face_distance([known_encoding], uploaded_face)[0]
-                    faces.append({
-                        "id": rostro["id"],
-                        "dist": float(distancia)
-                    })
+                if match:
+                    distancia = face_recognition.face_distance(
+                        [known_encoding], uploaded_face
+                    )[0]
+                    rostros_detectados.append(
+                        {"id": rostro["id"], "dist": float(distancia)}
+                    )
 
-    return {
-        "count": faces_found,
-        "faces": faces
-    }
+    logging.info(f"{len(rostros_detectados)} coincidencias encontradas.")
+    return {"count": len(uploaded_faces), "faces": rostros_detectados}
 
 
-# <Funciones para manejo de imágenes> #
+# === Endpoints ===
 
-# <Controladores HTTP> #
 
-# Ruta principal para reconocimiento facial desde una imagen enviada por POST
-@app.route('/', methods=['POST'])
+@app.route("/", methods=["POST"])
 def web_recognize():
     file = extract_image(request)
     matricula_id = request.args.get("matricula_id")
 
     if not matricula_id:
-        raise BadRequest("Missing 'matricula_id' in query params")
+        logging.error("Falta el parámetro 'matricula_id'.")
+        raise BadRequest("Missing 'matricula_id' in query parameters")
 
     if file and is_picture(file.filename):
+        logging.info(f"Inicio de proceso para matrícula {matricula_id}")
         rostros = get_faces_from_laravel(matricula_id)
-        return jsonify(detect_faces_in_image(file, rostros))
-    else:
-        raise BadRequest("Given file is invalid!")
+        resultado = detect_faces_in_image(file, rostros)
 
-# Ruta para manejar imágenes persistentes (registro y eliminación de rostros)
-@app.route('/faces', methods=['GET', 'POST', 'DELETE'])
-def web_faces():
-    # Retorna una lista de IDs de rostros registrados
-    if request.method == 'GET':
-        return jsonify(list(faces_dict.keys()))
+        timestamp = datetime.now().isoformat()
 
-    # Extrae la imagen enviada
-    file = extract_image(request)
-    if 'id' not in request.args:
-        raise BadRequest("Identifier for the face was not given!")
+        if resultado["faces"]:
+            enviado = reportar_asistencias(matricula_id, resultado["faces"], timestamp)
+            resultado["asistencia_reportada"] = enviado
+        else:
+            resultado["asistencia_reportada"] = False
 
-    # Registrar un nuevo rostro
-    if request.method == 'POST':
-        app.logger.info('%s loaded', file.filename)
-        file.save("{0}/{1}.jpg".format(persistent_faces, request.args.get('id')))
-        try:
-            new_encoding = calc_face_encoding(file)
-            faces_dict.update({request.args.get('id'): new_encoding})
-        except Exception as exception:
-            raise BadRequest(exception)
+        resultado["timestamp"] = timestamp
+        logging.info(f"Resultado del proceso: {resultado}")
+        return jsonify(resultado)
 
-    # Eliminar un rostro por su ID
-    elif request.method == 'DELETE':
-        faces_dict.pop(request.args.get('id'))
-        remove("{0}/{1}.jpg".format(persistent_faces, request.args.get('id')))
+    raise BadRequest("Invalid file")
 
-    return jsonify(list(faces_dict.keys()))
 
-@app.route('/encoding', methods=['POST'])
+@app.route("/encoding", methods=["POST"])
 def encode_face():
     file = extract_image(request)
     if file and is_picture(file.filename):
         try:
             encoding = calc_face_encoding(file)
-            return jsonify({"encoding": encoding.tolist()})  # encoding es un ndarray → convertir a lista JSON
+            return jsonify({"encoding": encoding.tolist()})
         except Exception as e:
+            logging.error(f"Error en encoding: {str(e)}")
             return jsonify({"error": str(e)}), 400
     return jsonify({"error": "Invalid image"}), 400
 
 
-# Extrae la imagen del request y valida su existencia
-def extract_image(request):
-    if 'file' not in request.files:
-        raise BadRequest("Missing file parameter!")
+@app.route("/faces", methods=["GET", "POST", "DELETE"])
+def web_faces():
+    if request.method == "GET":
+        return jsonify(list(faces_dict.keys()))
 
-    file = request.files['file']
-    if file.filename == '':
-        raise BadRequest("Given file is invalid")
+    file = extract_image(request)
+    if "id" not in request.args:
+        raise BadRequest("Missing 'id' parameter!")
 
-    return file
+    if request.method == "POST":
+        app.logger.info("%s loaded", file.filename)
+        file.save(f"{persistent_faces}/{request.args.get('id')}.jpg")
+        try:
+            new_encoding = calc_face_encoding(file)
+            faces_dict.update({request.args.get("id"): new_encoding})
+        except Exception as exception:
+            raise BadRequest(exception)
 
-# </Controladores HTTP> #
+    elif request.method == "DELETE":
+        faces_dict.pop(request.args.get("id"))
+        remove(f"{persistent_faces}/{request.args.get('id')}.jpg")
 
-# Código que se ejecuta al iniciar el servidor
+    return jsonify(list(faces_dict.keys()))
+
+
+@app.route("/status", methods=["GET"])
+def health_check():
+    return (
+        jsonify({"status": "ok", "message": "Face Recognition Service is running!"}),
+        200,
+    )
+
+
+# === Main ===
+
 if __name__ == "__main__":
-    print("Starting by generating encodings for found images...")
-    # Carga todos los rostros persistentes al iniciar el servicio
-    faces_dict = get_faces_dict(persistent_faces)
-    print(faces_dict)
+    logging.info("Iniciando microservicio de reconocimiento facial")
+    try:
+        faces_dict = get_faces_dict(persistent_faces)
+    except Exception as e:
+        logging.warning(f"No se pudieron cargar rostros persistentes: {e}")
+        faces_dict = {}
 
-    # Inicia el servidor Flask en el puerto 8080, accesible desde cualquier IP
-    print("Starting WebServer...")
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    logging.info("Servidor iniciado en puerto 8080")
+    app.run(host="0.0.0.0", port=8080, debug=True)
