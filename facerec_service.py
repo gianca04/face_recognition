@@ -212,7 +212,7 @@ def web_faces():
 @app.route("/status", methods=["GET"])
 def health_check():
     return (
-        jsonify({"status": "ok", "message": "Face Recognition Service is running!"}),
+        jsonify({"status": "ok", "message": "Face RecognitioService is running!"}),
         200,
     )
 

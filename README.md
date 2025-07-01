@@ -66,6 +66,8 @@ docker run -d `
 # CMD
 docker run -d -p 8080:8080 -v %cd%:/root/app -v faces: root/faces --name facerec_dev facerec_service python3 root/app/facerec_service.py
 
+docker run --hostname=bcdd212cff98 --env=PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin --env=LANG=C.UTF-8 --env=GPG_KEY=E3FF2839C048B25C084DEBE9B26995E310250568 --env=PYTHON_VERSION=3.8.20 --volume=faces:/root/faces --volume=/run/desktop/mnt/host/c/Users/granc/Documents/dev/python_proyectos/face_recognition:/root/app --network=bridge -p 8080:8080 --restart=no --runtime=runc -d facerec_service
+
 
 # 4. Verifica que el contenedor está corriendo
 docker ps
@@ -75,4 +77,7 @@ docker ps
 
 # 6. Accede al servicio desde tu navegador o curl
 curl http://localhost:8080/faces
+
+
+
 
